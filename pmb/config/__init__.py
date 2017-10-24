@@ -343,3 +343,18 @@ git_repos = {
     "aports_upstream": "https://github.com/alpinelinux/aports",
     "apk-tools": "https://github.com/alpinelinux/apk-tools",
 }
+
+
+#
+# APORTGEN
+#
+aportgen = {
+    "cross": {
+        "prefixes": ["binutils", "busybox-static", "gcc", "musl"],
+        "confirm_overwrite": False,
+    },
+    "device": {
+        "prefixes": ["device", "linux"],
+        "confirm_overwrite": True,
+    }
+}
