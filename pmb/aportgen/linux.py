@@ -43,58 +43,42 @@ def generate_apkbuild(args, pkgname, name, arch):
         HOSTCC="${HOSTCC#${CROSS_COMPILE}}"
 
         # Source
-        _repository="(REPLACEME)"
+        _repository="(CHANGEME!)"
         _commit="ffffffffffffffffffffffffffffffffffffffff"
         _config="config-${_flavor}.${arch}"
         source="
             $pkgname-$_commit.tar.gz::https://github.com/LineageOS/${_repository}/archive/${_commit}.tar.gz
             $_config
             compiler-gcc6.h
+            01_msm-fix-perf_trace_counters.patch
             02_gpu-msm-fix-gcc5-compile.patch
         "
-        ksrcdir="$srcdir/${_repository}-${_commit}"
+        builddir="$srcdir/${_repository}-${_commit}"
 
         prepare() {
-            local _patch_failed=
-            cd "$ksrcdir"
-
-            # first apply patches in specified order
-            for i in $source; do
-                case $i in
-                *.patch)
-                    msg "Applying $i..."
-                    if ! patch -s -p1 -N -i "$srcdir"/$i; then
-                        echo $i >>failed
-                        _patch_failed=1
-                    fi
-                    ;;
-                esac
-            done
-
-            if ! [ -z "$_patch_failed" ]; then
-                error "The following patches failed:"
-                cat failed
-                return 1
-            fi
+            default_prepare
 
             # gcc6 support
-            cp -v "$srcdir/compiler-gcc6.h" "$ksrcdir/include/linux/"
+            cp -v "$srcdir/compiler-gcc6.h" "$builddir/include/linux/"
+
+            # Remove -Werror from all makefiles
+            find . -type f -name Makefile -print0 | \\
+                xargs -0 sed -i 's/-Werror-/-W/g'
+            find . -type f -name Makefile -print0 | \\
+                xargs -0 sed -i 's/-Werror//g'
 
             # Prepare kernel config ('yes ""' for kernels lacking olddefconfig)
-            mkdir -p "$srcdir"/build
-            cp "$srcdir"/$_config "$srcdir"/build/.config
-            yes "" | make -C "$ksrcdir" O="$srcdir"/build ARCH="$_carch" \\
-                HOSTCC="$HOSTCC" oldconfig
+            cp "$srcdir"/$_config "$builddir"/.config
+            yes "" | make ARCH="$_carch" HOSTCC="$HOSTCC" oldconfig
         }
 
         menuconfig() {
-            cd "$srcdir"/build
+            cd "$builddir"
             make ARCH="$_carch" menuconfig
             cp .config "$startdir"/$_config
         }
 
         build() {
-            cd "$srcdir"/build
             unset LDFLAGS
             make ARCH="$_carch" CC="${CC:-gcc}" \\
                 KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-postmarketOS"
@@ -102,14 +86,22 @@ def generate_apkbuild(args, pkgname, name, arch):
 
         package() {
             # kernel.release
-            install -D "$srcdir/build/include/config/kernel.release" \\
+            install -D "$builddir/include/config/kernel.release" \\
                 "$pkgdir/usr/share/kernel/$_flavor/kernel.release"
 
-            # zImage or zImage-dtb
-            cd "$srcdir/build/arch/$_carch/boot"
-            _zimg="zImage-dtb"
-            [ -e "$_zimg" ] || _zimg="zImage"
-            install -Dm644 "$_zimg" "$pkgdir/boot/vmlinuz-$_flavor"
+            # zImage (find the right one)
+            cd "$builddir/arch/$_carch/boot"
+            _target="$pkgdir/boot/vmlinuz-$_flavor"
+            for _zimg in zImage-dtb Image.gz-dtb *zImage Image; do
+                [ -e "$_zimg" ] || continue
+                msg "zImage found: $_zimg"
+                install -Dm644 "$_zimg" "$_target"
+                break
+            done
+            if ! [ -e "$_target" ]; then
+                error "Could not find zImage in $PWD!"
+                return 1
+            fi
         }
 
         sha512sums="(run 'pmbootstrap checksum """ + pkgname + """' to fill)"
@@ -125,10 +117,11 @@ def generate(args, pkgname):
     device = "-".join(pkgname.split("-")[1:])
     deviceinfo = pmb.parse.deviceinfo(args, device)
 
-    # Copy gcc6 support header and one example patch from lg-mako for now
+    # Copy gcc6 support header and the patches from lg-mako for now
     # (automatically finding the right patches is planned in #688)
     pmb.helpers.run.user(args, ["mkdir", "-p", args.work + "/aportgen"])
-    for file in ["compiler-gcc6.h", "02_gpu-msm-fix-gcc5-compile.patch"]:
+    for file in ["compiler-gcc6.h", "01_msm-fix-perf_trace_counters.patch",
+                 "02_gpu-msm-fix-gcc5-compile.patch"]:
         pmb.helpers.run.user(args, ["cp", args.aports +
                                     "/device/linux-lg-mako/" + file,
                                     args.work + "/aportgen/"])
