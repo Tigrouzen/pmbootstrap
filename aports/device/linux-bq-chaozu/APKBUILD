@@ -1,0 +1,95 @@
+# APKBUILD based on linux-vanilla aport. Changes:
+# - disabled module installation
+# - add !check !tracedeps
+# - package: just install zimage and kernel.release, because the kernel config
+#	does not generate modules or dtb files
+# - do not create -dev subpackage (makes no sense without module support)
+#
+# Kernel config based on: arch/arm/configs/lineageos_chaozu_defconfig from Halium
+# Changes:
+# - enable devtmpfs (needed for udev -> touch support in weston)
+# - disable ANDROID_PARANOID_NETWORK (removes network restrictions)
+
+_vendor=bq
+_flavor=bq-chaozu
+_hash="c917abe24314321e157913ca23754bdebbd59684"
+_config="config-${_flavor}.armhf"
+
+pkgname=linux-${_flavor}
+pkgver=3.18.31
+case $pkgver in
+	*.*.*)  _kernver=${pkgver%.*};;
+	*.*) _kernver=$pkgver;;
+esac
+pkgrel=1
+arch="armhf"
+pkgdesc="LineageOS kernel BQ Aquaris U"
+url="https://github.com/LineageOS/android_kernel_bq_msm8937"
+depends="postmarketos-mkinitfs"
+makedepends="perl sed installkernel bash gmp-dev bc linux-headers elfutils-dev python2 dtbtool"
+options="!strip !check !tracedeps"
+install=
+source="
+	https://github.com/LineageOS/android_kernel_bq_msm8937/archive/${_hash}.tar.gz
+	${_config}
+"
+
+subpackages=""
+license="GPL2"
+
+_abi_release=${pkgver}
+_carch="arm"
+HOSTCC="${CC:-gcc}"
+HOSTCC="${HOSTCC#${CROSS_COMPILE}}"
+
+ksrcdir="$srcdir/android_kernel_bq_msm8937-${_hash}"
+
+prepare() {
+	local _patch_failed=
+	cd "$ksrcdir"
+
+	mkdir -p "$srcdir"/build
+	cp "$srcdir"/$_config "$srcdir"/build/.config
+	echo "--[ silentoldconfig ]--"
+	yes "" | make -C "$ksrcdir" O="$srcdir"/build ARCH="$_carch" HOSTCC="$HOSTCC" \
+		oldconfig
+}
+
+# this is so we can do: 'abuild menuconfig' to reconfigure kernel
+menuconfig() {
+	cd "$srcdir"/build
+	echo "--[ menuconfig ]--"
+	make ARCH="$_carch" menuconfig
+	cp .config "$startdir"/$_config
+}
+
+build() {
+	cd "$srcdir"/build
+	unset LDFLAGS
+	make ARCH="$_carch" CC="${CC:-gcc}" \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine" CONFIG_NO_ERROR_ON_MISMATCH=y
+	echo "--[ Build modules ]--"
+	make ARCH="$_carch" CC="${CC:-gcc}" \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine" CONFIG_NO_ERROR_ON_MISMATCH=y \
+		modules
+
+	dtbTool -s 2048 -p "scripts/dtc/" -o "arch/arm/boot/dt.img" "arch/arm/boot/"
+}
+
+package() {
+	install -Dm644 "$srcdir/build/arch/arm/boot/zImage-dtb" \
+		"$pkgdir/boot/vmlinuz-$_flavor"
+
+	install -D "$srcdir/build/include/config/kernel.release" \
+		"$pkgdir/usr/share/kernel/$_flavor/kernel.release"
+
+	cd "$srcdir"/build
+	unset LDFLAGS
+	echo "--[ Installing modules ]--"
+	make ARCH="$_carch" CC="${CC:-gcc}" \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine" CONFIG_NO_ERROR_ON_MISMATCH=y \
+		INSTALL_MOD_PATH="$pkgdir" modules_install
+}
+
+sha512sums="747e297c14051e1a9ba75e7e1361ba3dfe14047c551ddc464feed0dc54cec3d7df3fc4f39e66ed6678b5cf8481de8a280888e4f1fe8a5810b822839eb2621e03  c917abe24314321e157913ca23754bdebbd59684.tar.gz
+d2c6d3069dc9bbd9868568acd29f875e7b4d28b9c49c99572cfacb9f79a1234e5dd8be4b6357a43e2d4dba5080be8c887130af537846ae5fed18140797546360  config-bq-chaozu.armhf"

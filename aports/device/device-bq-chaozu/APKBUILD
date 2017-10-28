@@ -1,0 +1,20 @@
+pkgname=device-bq-chaozu
+pkgver=1
+pkgrel=1
+pkgdesc="BQ Aquaris U"
+url="https://github.com/postmarketOS"
+arch="noarch"
+license="MIT"
+depends="linux-bq-chaozu mkbootimg"
+makedepends=""
+install=""
+subpackages=""
+source="deviceinfo"
+options="!check"
+
+package() {
+	install -D -m644 "$srcdir/deviceinfo" \
+		"$pkgdir/etc/deviceinfo"
+}
+
+sha512sums="d9be178e189434d62600e05b05cc39f39d67124b27f7a5e57ceaf1eeeef62e1fb0caffa22d2452c95c722d4d25937359f0ffdbf30ac16c7351b492e73a26d0d6  deviceinfo"
