@@ -44,7 +44,17 @@ def ask_for_name(args):
     return pmb.helpers.cli.ask(args, "Name", None, None, False)
 
 
-def generate_deviceinfo(args, pkgname, name, manufacturer, arch):
+def ask_for_keyboard(args):
+    return pmb.helpers.cli.confirm(args, "Does the device has a hardware keyboard?")
+
+
+def ask_for_external_storage(args):
+    return pmb.helpers.cli.confirm(args, "Does the device have an sdcard or other"
+                                   " external storage medium?")
+
+
+def generate_deviceinfo(args, pkgname, name, manufacturer, arch, has_keyboard,
+                        has_external_storage):
     content = """\
         # Reference: <https://postmarketos.org/deviceinfo>
         # Please use double quotes only. You can source this file in shell scripts.
@@ -53,19 +63,18 @@ def generate_deviceinfo(args, pkgname, name, manufacturer, arch):
         deviceinfo_name=\"""" + name + """\"
         deviceinfo_manufacturer=\"""" + manufacturer + """\"
         deviceinfo_date=""
-        deviceinfo_keyboard="false"
-        deviceinfo_nonfree="????"
         deviceinfo_dtb=""
-        deviceinfo_modules=""
         deviceinfo_modules_initfs=""
-        deviceinfo_external_disk="false"
         deviceinfo_external_disk_install="false"
         deviceinfo_arch=\"""" + arch + """\"
 
-        # Splash screen
-        deviceinfo_dev_touchscreen=""
+        # Device related
+        deviceinfo_keyboard=\"""" + ("true" if has_keyboard else "false") + """\"
+        deviceinfo_external_disk=\"""" + ("true" if has_external_storage else "false") + """\"
         deviceinfo_screen_width="800"
         deviceinfo_screen_height="600"
+        deviceinfo_dev_touchscreen=""
+        deviceinfo_dev_keyboard=""
 
         # Bootloader related
         deviceinfo_kernel_cmdline=""
@@ -101,7 +110,7 @@ def generate_apkbuild(args, pkgname, name, arch):
         source="deviceinfo"
 
         package() {
-            install -D -m644 "$srcdir"/deviceinfo \\
+            install -Dm644 "$srcdir"/deviceinfo \\
                 "$pkgdir"/etc/deviceinfo
         }
 
@@ -119,6 +128,9 @@ def generate(args, pkgname):
     arch = ask_for_architecture(args)
     manufacturer = ask_for_manufacturer(args)
     name = ask_for_name(args)
+    has_keyboard = ask_for_keyboard(args)
+    has_external_storage = ask_for_external_storage(args)
 
-    generate_deviceinfo(args, pkgname, name, manufacturer, arch)
+    generate_deviceinfo(args, pkgname, name, manufacturer, arch, has_keyboard,
+                        has_external_storage)
     generate_apkbuild(args, pkgname, name, arch)
