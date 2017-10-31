@@ -1,0 +1,93 @@
+# APKBUILD based on linux-vanilla aport. Changes:
+# - disabled module installation
+# - add !check !tracedeps
+# - package: just install zimage and kernel.release, because the kernel config
+#	does not generate modules or dtb files
+# - do not create -dev subpackage (makes no sense without module support)
+#
+# Kernel config based on: arch/arm/configs/lineageos_krillin_defconfig from Halium
+# Changes:
+# - enable devtmpfs (needed for udev -> touch support in weston)
+# - disable ANDROID_PARANOID_NETWORK (removes network restrictions)
+
+_vendor=bq
+_flavor=bq-krillin
+_hash="fab27fb3fb7ed6b434099270e90ba14c4adb7384"
+_config="config-${_flavor}.armhf"
+
+pkgname=linux-${_flavor}
+pkgver=3.10.107
+case $pkgver in
+	*.*.*)  _kernver=${pkgver%.*};;
+	*.*) _kernver=$pkgver;;
+esac
+pkgrel=1
+arch="armhf"
+pkgdesc="LineageOS kernel BQ Aquaris E4.5"
+url="https://github.com/Pablito2020/android_kernel_bq_krillin"
+depends="postmarketos-mkinitfs"
+makedepends="perl sed installkernel bash gmp-dev bc linux-headers elfutils-dev python2"
+options="!strip !check !tracedeps"
+install=
+source="
+	https://github.com/Pablito2020/android_kernel_bq_krillin/archive/${_hash}.tar.gz
+	${_config}
+"
+
+subpackages=""
+license="GPL2"
+
+_abi_release=${pkgver}
+_carch="arm"
+HOSTCC="${CC:-gcc}"
+HOSTCC="${HOSTCC#${CROSS_COMPILE}}"
+
+ksrcdir="$srcdir/android_kernel_bq_krillin-${_hash}"
+
+prepare() {
+	local _patch_failed=
+	cd "$ksrcdir"
+
+	mkdir -p "$srcdir"/build
+	cp "$srcdir"/$_config "$srcdir"/build/.config
+	echo "--[ silentoldconfig ]--"
+	yes "" | make -C "$ksrcdir" O="$srcdir"/build ARCH="$_carch" HOSTCC="$HOSTCC" \
+		oldconfig
+}
+
+# this is so we can do: 'abuild menuconfig' to reconfigure kernel
+menuconfig() {
+	cd "$srcdir"/build
+	echo "--[ menuconfig ]--"
+	make ARCH="$_carch" menuconfig
+	cp .config "$startdir"/$_config
+}
+
+build() {
+	cd "$srcdir"/build
+	unset LDFLAGS
+	make ARCH="$_carch" CC="${CC:-gcc}" \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine" CONFIG_NO_ERROR_ON_MISMATCH=y
+	echo "--[ Build modules ]--"
+	make ARCH="$_carch" CC="${CC:-gcc}" \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine" CONFIG_NO_ERROR_ON_MISMATCH=y \
+		modules
+}
+
+package() {
+	install -Dm644 "$srcdir/build/arch/arm/boot/zImage" \
+		"$pkgdir/boot/vmlinuz-$_flavor"
+
+	install -D "$srcdir/build/include/config/kernel.release" \
+		"$pkgdir/usr/share/kernel/$_flavor/kernel.release"
+
+	cd "$srcdir"/build
+	unset LDFLAGS
+	echo "--[ Installing modules ]--"
+	make ARCH="$_carch" CC="${CC:-gcc}" \
+		KBUILD_BUILD_VERSION="$((pkgrel + 1 ))-Alpine" CONFIG_NO_ERROR_ON_MISMATCH=y \
+		INSTALL_MOD_PATH="$pkgdir" modules_install
+}
+
+sha512sums="bc179eaa64a474401c736f28db809444204b9602830df1de5cdb3b22122ba4514d096ad04d5d375aae9c2c0a1c2c2627de5a4bcd881c3d0f02841cb4c4f19ae5  fab27fb3fb7ed6b434099270e90ba14c4adb7384.tar.gz
+0d952dae1b3f7f40b6f3ee4d1fb824d9b45249ef730cc00b4bc039799ea171e327b681cf03fc1b7b655c6d0d4d7914f6b6db653c3b0d5a21644c9dc662647d0d  config-bq-krillin.armhf"
