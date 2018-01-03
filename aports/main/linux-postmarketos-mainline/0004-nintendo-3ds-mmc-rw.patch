@@ -1,0 +1,507 @@
+From 7cbcf3102b27aa3323cb715a83eb8c9b809a2e8c Mon Sep 17 00:00:00 2001
+From: Morten Delenk <morten@dark32.cf>
+Date: Sun, 20 Aug 2017 10:31:14 +0100
+Subject: [PATCH 1/4] added untested sdmmc write and size support
+
+---
+ arch/arm/mach-nintendo3ds/include/mach/pxi.h     |  1 +
+ arch/arm/mach-nintendo3ds/include/mach/pxi_cmd.h | 13 +++++++
+ arch/arm/mach-nintendo3ds/pxi.c                  | 47 ++++++++++++++++++++++++
+ drivers/block/nintendo3ds_mmc.c                  | 25 +++++++++++--
+ 4 files changed, 82 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm/mach-nintendo3ds/include/mach/pxi.h b/arch/arm/mach-nintendo3ds/include/mach/pxi.h
+index 1dfba9d205f1e..44fdb91efa7b8 100644
+--- a/arch/arm/mach-nintendo3ds/include/mach/pxi.h
++++ b/arch/arm/mach-nintendo3ds/include/mach/pxi.h
+@@ -37,5 +37,6 @@
+ #define PXI_SYNC_IRQ_ENABLE		(1 << 31)
+ 
+ void pxi_send_cmd(struct pxi_cmd_hdr *cmd);
++unsigned int pxi_get_sdmmc_size(void);
+ 
+ #endif
+diff --git a/arch/arm/mach-nintendo3ds/include/mach/pxi_cmd.h b/arch/arm/mach-nintendo3ds/include/mach/pxi_cmd.h
+index 4a973b2c2c7b3..865557dc8241a 100644
+--- a/arch/arm/mach-nintendo3ds/include/mach/pxi_cmd.h
++++ b/arch/arm/mach-nintendo3ds/include/mach/pxi_cmd.h
+@@ -14,6 +14,8 @@
+ #define PXI_CMD_NONE			0
+ #define PXI_CMD_PING			1
+ #define PXI_CMD_SDMMC_READ_SECTOR	2
++#define PXI_CMD_SDMMC_WRITE_SECTOR  3
++#define PXI_CMD_SDMMC_GET_SIZE      4
+ 
+ struct pxi_cmd_hdr {
+ 	struct {
+@@ -29,4 +31,15 @@ struct pxi_cmd_sdmmc_read_sector {
+ 	u32 paddr;
+ } __attribute__((packed));
+ 
++struct pxi_cmd_sdmmc_write_sector {
++    struct pxi_cmd_hdr header;
++    u32 sector;
++    u32 paddr;
++} __attribute__((packed));
++
++struct pxi_resp_sdmmc_get_size {
++    struct pxi_cmd_hdr header;
++    u32 size;
++} __attribute__((packed));
++
+ #endif
+diff --git a/arch/arm/mach-nintendo3ds/pxi.c b/arch/arm/mach-nintendo3ds/pxi.c
+index 89bc41129e765..a1684bdf86555 100644
+--- a/arch/arm/mach-nintendo3ds/pxi.c
++++ b/arch/arm/mach-nintendo3ds/pxi.c
+@@ -81,12 +81,57 @@ static void pxi_reset(void)
+ 	PXI_REG_WRITE(PXI_REG_SYNC11_OFFSET, PXI_SYNC_IRQ_ENABLE);
+ }
+ 
++static void pxi_recv_cmd_hdr(struct pxi_cmd_hdr *cmd)
++{
++	*(u32 *)cmd = pxi_recv_fifo_pop();
++}
++
++static void pxi_recv_buffer(void *data, u32 size)
++{
++	u32 i;
++
++	for (i = 0; i < size; i+=4) {
++		while (pxi_recv_fifo_is_empty())
++			;
++		((u32 *)data)[i/4] = pxi_recv_fifo_pop();
++	}
++}
++
++static u32 disk_size=0;
+ static irqreturn_t sync_irq_handler(int irq, void *dummy)
+ {
+ 	printk("GOT IRQ: %d\n", irq);
++
++    if(pxi_recv_fifo_is_empty())
++        return IRQ_HANDLED;
++
++    mutex_lock(&pxi_lock);
++
++    struct pxi_resp_sdmmc_get_size cmd;
++
++    pxi_recv_cmd_hdr((struct pxi_cmd_hdr *)&cmd);
++
++    if(cmd.header.cmd != PXI_CMD_SDMMC_GET_SIZE) {
++        mutex_unlock(&pxi_lock);
++        return IRQ_HANDLED;
++    }
++    pxi_recv_buffer(&(cmd.header.data), cmd.header.len);
++    printk("GOT SD size: %d\n", cmd.size);
++    disk_size=cmd.size;
++
++    mutex_unlock(&pxi_lock);
++
+ 	return IRQ_HANDLED;
+ }
+ 
++u32 pxi_get_sdmmc_size(void) {
++    mutex_lock(&pxi_lock);
++    u32 ds = disk_size;
++    mutex_unlock(&pxi_lock);
++    return ds;
++}
++EXPORT_SYMBOL(pxi_get_sdmmc_size);
++
+ void pxi_send_cmd(struct pxi_cmd_hdr *cmd)
+ {
+ 	unsigned int i;
+@@ -121,6 +166,8 @@ void pxi_send_cmd(struct pxi_cmd_hdr *cmd)
+ }
+ EXPORT_SYMBOL(pxi_send_cmd);
+ 
++
++
+ static int __init pxi_init(void)
+ {
+ 	unsigned int sync_hwirq;
+diff --git a/drivers/block/nintendo3ds_mmc.c b/drivers/block/nintendo3ds_mmc.c
+index a7848e4fea14e..697ff58e7ef04 100644
+--- a/drivers/block/nintendo3ds_mmc.c
++++ b/drivers/block/nintendo3ds_mmc.c
+@@ -54,8 +54,18 @@ struct nintendo3ds_mmc {
+ static void nintendo3ds_pxi_mmc_write_sectors(struct nintendo3ds_mmc *mmc,
+ 	sector_t sector_off, u8 *buffer, unsigned int sectors)
+ {
+-	/*memcpy(dev_data + sector_off * NINTENDO3DS_MMC_BLOCKSIZE, buffer,
+-		sectors * NINTENDO3DS_MMC_BLOCKSIZE);*/
++    unsigned int i;
++
++    for (i = 0; i < sectors; i++) {
++        struct pxi_cmd_sdmmc_write_sector cmd = {
++            .header.cmd = PXI_CMD_SDMMC_WRITE_SECTOR,
++            .header.len = sizeof(cmd) - sizeof(struct pxi_cmd_hdr),
++            .sector = sector_off + i,
++            .paddr = (u32)virt_to_phys(buffer + i * NINTENDO3DS_MMC_BLOCKSIZE)
++        };
++
++        pxi_send_cmd((struct pxi_cmd_hdr *)&cmd);
++    }
+ }
+ 
+ static void nintendo3ds_pxi_mmc_read_sectors(struct nintendo3ds_mmc *mmc,
+@@ -196,8 +206,15 @@ static int nintendo3ds_mmc_probe(struct platform_device *pdev)
+ 	mmc->disk->queue = mmc->queue;
+ 	sprintf(mmc->disk->disk_name, "nintendo3ds_mmc");
+ 
+-	//mmc->size = pxi_...
+-	mmc->size = 31586304; /* 16GB SD card */
++    struxt pxi_cmd_hdr *size_cmd;
++    size_cmd.cmd = PXI_CMD_SDMMC_GET_SIZE;
++    size_cmd.size = 0;
++
++    pxi_send_cmd(&size_cmd);
++
++	mmc->size = 0;
++    while(mmc->size == 0)
++        mmc->size = pxi_get_sdmmc_size();
+ 
+ 	platform_set_drvdata(pdev, mmc);
+ 
+
+From 66d59f3e429d4fb520a8e2b31691af91e14bfaf7 Mon Sep 17 00:00:00 2001
+From: Ezekiel Bethel <mctinfoilball@gmail.com>
+Date: Fri, 1 Sep 2017 10:07:00 +0000
+Subject: [PATCH 2/4] fix @Mtgxyz2's mmc code, add pxi to device tree so the
+ interrupt binding works properly. also make mmc driver wait until pxi is up
+ and fix mmc driver to not read the command response as it is read in the irq
+ handler
+
+---
+ arch/arm/boot/dts/nintendo3ds_ctr.dts        |  6 ++++
+ arch/arm/mach-nintendo3ds/include/mach/pxi.h |  4 +--
+ arch/arm/mach-nintendo3ds/pxi.c              | 54 +++++++++++++++++++++-------
+ drivers/block/nintendo3ds_mmc.c              | 21 ++++++-----
+ 4 files changed, 62 insertions(+), 23 deletions(-)
+
+diff --git a/arch/arm/boot/dts/nintendo3ds_ctr.dts b/arch/arm/boot/dts/nintendo3ds_ctr.dts
+index 5b5c349a7b572..10a60bd88224c 100644
+--- a/arch/arm/boot/dts/nintendo3ds_ctr.dts
++++ b/arch/arm/boot/dts/nintendo3ds_ctr.dts
+@@ -227,4 +227,10 @@
+ 			#dma-requests = <32>;
+ 		};
+ 	};
++
++	pxi {
++		compatible = "nintendo3ds,nintendo3ds-pxi";
++		interrupts = <GIC_SPI 0x30 IRQ_TYPE_EDGE_RISING>;
++		interrupt-parent = <&gic>;
++	};
+ };
+diff --git a/arch/arm/mach-nintendo3ds/include/mach/pxi.h b/arch/arm/mach-nintendo3ds/include/mach/pxi.h
+index 44fdb91efa7b8..16b395b4eada3 100644
+--- a/arch/arm/mach-nintendo3ds/include/mach/pxi.h
++++ b/arch/arm/mach-nintendo3ds/include/mach/pxi.h
+@@ -36,7 +36,7 @@
+ #define PXI_SYNC_TRIGGER_PXI_SYNC9	(1 << 30)
+ #define PXI_SYNC_IRQ_ENABLE		(1 << 31)
+ 
+-void pxi_send_cmd(struct pxi_cmd_hdr *cmd);
++void pxi_send_cmd(struct pxi_cmd_hdr *cmd, int wait);
+ unsigned int pxi_get_sdmmc_size(void);
+-
++int pxi_is_active(void);
+ #endif
+diff --git a/arch/arm/mach-nintendo3ds/pxi.c b/arch/arm/mach-nintendo3ds/pxi.c
+index a1684bdf86555..121a6881003f4 100644
+--- a/arch/arm/mach-nintendo3ds/pxi.c
++++ b/arch/arm/mach-nintendo3ds/pxi.c
+@@ -12,10 +12,19 @@
+ #include <linux/mutex.h>
+ #include <linux/interrupt.h>
+ #include <linux/irqdomain.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
+ #include <asm/io.h>
+ #include <mach/platform.h>
+ #include <mach/pxi.h>
+ 
++static int _pxi_is_active = 0;
++
++int pxi_is_active(void)
++{
++	return _pxi_is_active;
++}
++
+ static u8 __iomem *pxi_base = NULL;
+ static DEFINE_MUTEX(pxi_lock);
+ 
+@@ -132,7 +141,7 @@ u32 pxi_get_sdmmc_size(void) {
+ }
+ EXPORT_SYMBOL(pxi_get_sdmmc_size);
+ 
+-void pxi_send_cmd(struct pxi_cmd_hdr *cmd)
++void pxi_send_cmd(struct pxi_cmd_hdr *cmd, int wait)
+ {
+ 	unsigned int i;
+ 
+@@ -157,18 +166,19 @@ void pxi_send_cmd(struct pxi_cmd_hdr *cmd)
+ 	/*
+ 	 * Wait for the reply.
+ 	 */
+-	do {
+-		while (pxi_recv_fifo_is_empty())
+-			;
+-	} while (pxi_recv_fifo_pop() != cmd->cmd);
++	if(wait)
++	{
++		do {
++			while (pxi_recv_fifo_is_empty())
++				;
++		} while (pxi_recv_fifo_pop() != cmd->cmd);
++	}
+ 
+ 	mutex_unlock(&pxi_lock);
+ }
+ EXPORT_SYMBOL(pxi_send_cmd);
+ 
+-
+-
+-static int __init pxi_init(void)
++static int nintendo3ds_pxi_probe(struct platform_device *pdev)
+ {
+ 	unsigned int sync_hwirq;
+ 
+@@ -205,16 +215,34 @@ static int __init pxi_init(void)
+ 		pxi_send_cmd((struct pxi_cmd_hdr *)&cmd);
+ 	}*/
+ 
++	_pxi_is_active = 1;
++
+ 	return 0;
+ }
+ 
+-/*static void pxi_deinit(void)
++static void nintendo3ds_pxi_deinit(void)
+ {
+-	if (pxi_base) {
++	/*if (pxi_base) {
+ 		iounmap(pxi_base);
+ 		release_mem_region(NINTENDO3DS_PXI_REGS_BASE,
+ 				   NINTENDO3DS_PXI_REGS_SIZE);
+-	}
+-}*/
++	}*/
++}
++
++
++static const struct of_device_id nintendo3ds_pxi_dt_ids[] = {
++        { .compatible = "nintendo3ds-pxi", },
++        {},
++};
++MODULE_DEVICE_TABLE(of, nintendo3ds_pxi_dt_ids);
++
++static struct platform_driver nintendo3ds_pxi_driver = {
++        .driver         = {
++                .name   = "nintendo3ds_pxi",
++                .owner = THIS_MODULE,
++                .of_match_table = nintendo3ds_pxi_dt_ids,
++        },
++        .remove         = __exit_p(nintendo3ds_pxi_deinit)
++};
+ 
+-subsys_initcall(pxi_init);
++module_platform_driver_probe(nintendo3ds_pxi_driver, nintendo3ds_pxi_probe)
+diff --git a/drivers/block/nintendo3ds_mmc.c b/drivers/block/nintendo3ds_mmc.c
+index 697ff58e7ef04..fad1f869e795d 100644
+--- a/drivers/block/nintendo3ds_mmc.c
++++ b/drivers/block/nintendo3ds_mmc.c
+@@ -64,7 +64,7 @@ static void nintendo3ds_pxi_mmc_write_sectors(struct nintendo3ds_mmc *mmc,
+             .paddr = (u32)virt_to_phys(buffer + i * NINTENDO3DS_MMC_BLOCKSIZE)
+         };
+ 
+-        pxi_send_cmd((struct pxi_cmd_hdr *)&cmd);
++        pxi_send_cmd((struct pxi_cmd_hdr *)&cmd, 1 /* wait for response */);
+     }
+ }
+ 
+@@ -81,7 +81,7 @@ static void nintendo3ds_pxi_mmc_read_sectors(struct nintendo3ds_mmc *mmc,
+ 			.paddr = (u32)virt_to_phys(buffer + i * NINTENDO3DS_MMC_BLOCKSIZE)
+ 		};
+ 
+-		pxi_send_cmd((struct pxi_cmd_hdr *)&cmd);
++		pxi_send_cmd((struct pxi_cmd_hdr *)&cmd, 1 /* wait for response */);
+ 	}
+ }
+ 
+@@ -172,6 +172,12 @@ static int nintendo3ds_mmc_probe(struct platform_device *pdev)
+ {
+ 	int error;
+ 	struct nintendo3ds_mmc *mmc;
++	struct pxi_cmd_hdr size_cmd;
++
++	if(!pxi_is_active())
++	{
++		return -EPROBE_DEFER;
++	}
+ 
+ 	mmc = kzalloc(sizeof(*mmc), GFP_KERNEL);
+ 	if (!mmc)
+@@ -206,15 +212,14 @@ static int nintendo3ds_mmc_probe(struct platform_device *pdev)
+ 	mmc->disk->queue = mmc->queue;
+ 	sprintf(mmc->disk->disk_name, "nintendo3ds_mmc");
+ 
+-    struxt pxi_cmd_hdr *size_cmd;
+-    size_cmd.cmd = PXI_CMD_SDMMC_GET_SIZE;
+-    size_cmd.size = 0;
++	size_cmd.cmd = PXI_CMD_SDMMC_GET_SIZE;
++	size_cmd.len = 0;
+ 
+-    pxi_send_cmd(&size_cmd);
++	pxi_send_cmd(&size_cmd, 0 /* don't wait for response - we handle it in the irq */);
+ 
+ 	mmc->size = 0;
+-    while(mmc->size == 0)
+-        mmc->size = pxi_get_sdmmc_size();
++	while(mmc->size == 0)
++		mmc->size = pxi_get_sdmmc_size();
+ 
+ 	platform_set_drvdata(pdev, mmc);
+ 
+
+From a0a236b455d37146bc86bc4757410ca28bb48dfc Mon Sep 17 00:00:00 2001
+From: Ezekiel Bethel <mctinfoilball@gmail.com>
+Date: Fri, 1 Sep 2017 12:23:27 +0000
+Subject: [PATCH 3/4] hit it with a large stick
+
+---
+ arch/arm/boot/dts/nintendo3ds_ctr.dts | 15 ++++++++++-----
+ arch/arm/mach-nintendo3ds/pxi.c       |  9 ---------
+ drivers/block/nintendo3ds_mmc.c       |  5 -----
+ 3 files changed, 10 insertions(+), 19 deletions(-)
+
+diff --git a/arch/arm/boot/dts/nintendo3ds_ctr.dts b/arch/arm/boot/dts/nintendo3ds_ctr.dts
+index 10a60bd88224c..c6182894cce18 100644
+--- a/arch/arm/boot/dts/nintendo3ds_ctr.dts
++++ b/arch/arm/boot/dts/nintendo3ds_ctr.dts
+@@ -165,10 +165,6 @@
+ 		interrupt-parent = <&gic>;
+ 	};
+ 
+-	mmc0: mmc@0 {
+-		compatible = "nintendo3ds-mmc";
+-	};
+-
+ 	nintendo3ds_refclk144mhz: refclk144mkhz {
+ 		compatible = "fixed-clock";
+ 		#clock-cells = <0>;
+@@ -229,8 +225,17 @@
+ 	};
+ 
+ 	pxi {
+-		compatible = "nintendo3ds,nintendo3ds-pxi";
++		compatible = "nintendo3ds-pxi";
+ 		interrupts = <GIC_SPI 0x30 IRQ_TYPE_EDGE_RISING>;
+ 		interrupt-parent = <&gic>;
++
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		mmc0: mmc@0 {
++			compatible = "nintendo3ds-mmc";
++			reg = <0>;
++		};
++
+ 	};
+ };
+diff --git a/arch/arm/mach-nintendo3ds/pxi.c b/arch/arm/mach-nintendo3ds/pxi.c
+index 121a6881003f4..65497c99d6162 100644
+--- a/arch/arm/mach-nintendo3ds/pxi.c
++++ b/arch/arm/mach-nintendo3ds/pxi.c
+@@ -18,13 +18,6 @@
+ #include <mach/platform.h>
+ #include <mach/pxi.h>
+ 
+-static int _pxi_is_active = 0;
+-
+-int pxi_is_active(void)
+-{
+-	return _pxi_is_active;
+-}
+-
+ static u8 __iomem *pxi_base = NULL;
+ static DEFINE_MUTEX(pxi_lock);
+ 
+@@ -215,8 +208,6 @@ static int nintendo3ds_pxi_probe(struct platform_device *pdev)
+ 		pxi_send_cmd((struct pxi_cmd_hdr *)&cmd);
+ 	}*/
+ 
+-	_pxi_is_active = 1;
+-
+ 	return 0;
+ }
+ 
+diff --git a/drivers/block/nintendo3ds_mmc.c b/drivers/block/nintendo3ds_mmc.c
+index fad1f869e795d..95d8b8e968230 100644
+--- a/drivers/block/nintendo3ds_mmc.c
++++ b/drivers/block/nintendo3ds_mmc.c
+@@ -174,11 +174,6 @@ static int nintendo3ds_mmc_probe(struct platform_device *pdev)
+ 	struct nintendo3ds_mmc *mmc;
+ 	struct pxi_cmd_hdr size_cmd;
+ 
+-	if(!pxi_is_active())
+-	{
+-		return -EPROBE_DEFER;
+-	}
+-
+ 	mmc = kzalloc(sizeof(*mmc), GFP_KERNEL);
+ 	if (!mmc)
+ 		return -ENOMEM;
+
+From 52081012e7a5f2a2db981fa2cc38095daca4fa00 Mon Sep 17 00:00:00 2001
+From: Ezekiel Bethel <mctinfoilball@gmail.com>
+Date: Tue, 12 Sep 2017 20:08:38 +0000
+Subject: [PATCH 4/4] it works, sorta
+
+---
+ arch/arm/boot/dts/nintendo3ds_ctr.dts | 13 ++++---------
+ arch/arm/mach-nintendo3ds/pxi.c       |  2 +-
+ 2 files changed, 5 insertions(+), 10 deletions(-)
+
+diff --git a/arch/arm/boot/dts/nintendo3ds_ctr.dts b/arch/arm/boot/dts/nintendo3ds_ctr.dts
+index c6182894cce18..08bf5408165ce 100644
+--- a/arch/arm/boot/dts/nintendo3ds_ctr.dts
++++ b/arch/arm/boot/dts/nintendo3ds_ctr.dts
+@@ -224,18 +224,13 @@
+ 		};
+ 	};
+ 
++	mmc0: mmc@0 {
++		compatible = "nintendo3ds-mmc";
++	};
++
+ 	pxi {
+ 		compatible = "nintendo3ds-pxi";
+ 		interrupts = <GIC_SPI 0x30 IRQ_TYPE_EDGE_RISING>;
+ 		interrupt-parent = <&gic>;
+-
+-		#address-cells = <1>;
+-		#size-cells = <0>;
+-
+-		mmc0: mmc@0 {
+-			compatible = "nintendo3ds-mmc";
+-			reg = <0>;
+-		};
+-
+ 	};
+ };
+diff --git a/arch/arm/mach-nintendo3ds/pxi.c b/arch/arm/mach-nintendo3ds/pxi.c
+index 65497c99d6162..6b466df944154 100644
+--- a/arch/arm/mach-nintendo3ds/pxi.c
++++ b/arch/arm/mach-nintendo3ds/pxi.c
+@@ -188,7 +188,7 @@ static int nintendo3ds_pxi_probe(struct platform_device *pdev)
+ 
+ 	pxi_reset();
+ 
+-	sync_hwirq = irq_find_mapping(NULL, PXI_HWIRQ_SYNC);
++	sync_hwirq = platform_get_irq(pdev, 0);
+ 
+ 	if (request_irq(sync_hwirq, sync_irq_handler, 0, "pxi_sync", NULL)) {
+ 		printk(KERN_ERR "Can't allocate irq (0x%02X): %d\n",

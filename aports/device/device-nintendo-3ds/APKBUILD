@@ -1,0 +1,22 @@
+# Reference: <https://postmarketos.org/devicepkg>
+pkgname="device-nintendo-3ds"
+pkgdesc="nintdeno Nintendo 3DS"
+pkgver=0.1
+pkgrel=0
+url="https://postmarketos.org"
+license="MIT"
+arch="noarch"
+options="!check"
+depends="linux-postmarketos-mainline mkbootimg"
+makedepends="devicepkg-dev"
+source="deviceinfo"
+
+build() {
+	devicepkg_build $startdir $pkgname
+}
+
+package() {
+	devicepkg_package $startdir $pkgname
+}
+
+sha512sums="ba60d10dfa7d5440191df2a7902c1f55364c152ad3008ec4eb746abd1787130784e87e7590b15336c747635aaec80ace05f68c8e0981782f805da66d7a62f739  deviceinfo"
